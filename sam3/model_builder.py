@@ -429,7 +429,8 @@ def _create_tracker_transformer():
 
 
 def build_tracker(
-    apply_temporal_disambiguation: bool, with_backbone: bool = False, compile_mode=None
+    apply_temporal_disambiguation: bool, with_backbone: bool = False, compile_mode=None,
+    vision_backbone=None
 ) -> Sam3TrackerPredictor:
     """
     Build the SAM3 Tracker module for video tracking.
@@ -443,7 +444,8 @@ def build_tracker(
     transformer = _create_tracker_transformer()
     backbone = None
     if with_backbone:
-        vision_backbone = _create_vision_backbone(compile_mode=compile_mode)
+        if vision_backbone is None:
+            vision_backbone = _create_vision_backbone(compile_mode=compile_mode)
         backbone = SAM3VLBackbone(scalp=1, visual=vision_backbone, text=None)
     # Create the Tracker module
     model = Sam3TrackerPredictor(
@@ -522,10 +524,20 @@ def _create_sam3_transformer(has_presence_token: bool = True) -> TransformerWrap
 
 def _load_checkpoint(model, checkpoint_path):
     """Load model checkpoint from file."""
+    import time
+    load_start = time.time()
+    print(f"[INFO] 开始加载 checkpoint: {checkpoint_path}")
+    
     with g_pathmgr.open(checkpoint_path, "rb") as f:
+        load_file_start = time.time()
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
+        load_file_time = time.time() - load_file_start
+        print(f"[INFO] checkpoint 文件读取完成 (耗时 {load_file_time:.1f} 秒)")
+    
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
+    
+    process_start = time.time()
     sam3_image_ckpt = {
         k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
     }
@@ -537,18 +549,33 @@ def _load_checkpoint(model, checkpoint_path):
                 if "tracker" in k
             }
         )
+    process_time = time.time() - process_start
+    print(f"[INFO] checkpoint 键名处理完成 (耗时 {process_time:.1f} 秒)")
+    
+    load_state_start = time.time()
     missing_keys, _ = model.load_state_dict(sam3_image_ckpt, strict=False)
+    load_state_time = time.time() - load_state_start
+    print(f"[INFO] 模型权重加载完成 (耗时 {load_state_time:.1f} 秒)")
+    
     if len(missing_keys) > 0:
         print(
             f"loaded {checkpoint_path} and found "
             f"missing and/or unexpected keys:\n{missing_keys=}"
         )
+    
+    total_time = time.time() - load_start
+    print(f"[INFO] checkpoint 加载总耗时: {total_time:.1f} 秒")
 
 
 def _setup_device_and_mode(model, device, eval_mode):
     """Setup model device and evaluation mode."""
+    import time
     if device == "cuda":
+        to_device_start = time.time()
+        print("[INFO] 正在将模型转移到 GPU...")
         model = model.cuda()
+        to_device_time = time.time() - to_device_start
+        print(f"[INFO] 模型转移到 GPU 完成 (耗时 {to_device_time:.1f} 秒)")
     if eval_mode:
         model.eval()
     return model
@@ -558,8 +585,8 @@ def build_sam3_image_model(
     bpe_path=None,
     device="cuda" if torch.cuda.is_available() else "cpu",
     eval_mode=True,
-    checkpoint_path=None,
-    load_from_HF=True,
+    checkpoint_path="/mnt/d/AI/sam-3d-objects-main/external/sam3/checkpoints/sam3.pt",#
+    load_from_HF=False,
     enable_segmentation=True,
     enable_inst_interactivity=False,
     compile=False,
@@ -579,43 +606,80 @@ def build_sam3_image_model(
     Returns:
         A SAM3 image model
     """
+    import time
+    build_start = time.time()
+    
     if bpe_path is None:
         bpe_path = os.path.join(
             os.path.dirname(__file__), "..", "assets", "bpe_simple_vocab_16e6.txt.gz"
         )
+    
     # Create visual components
+    print("[INFO] 创建视觉编码器...")
+    step_start = time.time()
     compile_mode = "default" if compile else None
     vision_encoder = _create_vision_backbone(
         compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity
     )
+    print(f"[INFO] 视觉编码器创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
 
     # Create text components
+    print("[INFO] 创建文本编码器...")
+    step_start = time.time()
     text_encoder = _create_text_encoder(bpe_path)
+    print(f"[INFO] 文本编码器创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
 
     # Create visual-language backbone
+    print("[INFO] 创建视觉-语言 backbone...")
+    step_start = time.time()
     backbone = _create_vl_backbone(vision_encoder, text_encoder)
+    print(f"[INFO] backbone 创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
 
     # Create transformer components
+    print("[INFO] 创建 Transformer...")
+    step_start = time.time()
     transformer = _create_sam3_transformer()
+    print(f"[INFO] Transformer 创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
 
     # Create dot product scoring
+    print("[INFO] 创建 dot product scoring...")
+    step_start = time.time()
     dot_prod_scoring = _create_dot_product_scoring()
+    print(f"[INFO] dot product scoring 创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
 
     # Create segmentation head if enabled
-    segmentation_head = (
-        _create_segmentation_head(compile_mode=compile_mode)
-        if enable_segmentation
-        else None
-    )
+    if enable_segmentation:
+        print("[INFO] 创建分割头...")
+        step_start = time.time()
+        segmentation_head = _create_segmentation_head(compile_mode=compile_mode)
+        print(f"[INFO] 分割头创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
+    else:
+        segmentation_head = None
 
     # Create geometry encoder
+    print("[INFO] 创建几何编码器...")
+    step_start = time.time()
     input_geometry_encoder = _create_geometry_encoder()
+    print(f"[INFO] 几何编码器创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
+    
     if enable_inst_interactivity:
-        sam3_pvs_base = build_tracker(apply_temporal_disambiguation=False)
+        print("[INFO] 创建交互式预测器 (Tracker)...")
+        step_start = time.time()
+        # 为交互式图像预测器构建带有视觉 backbone 的 Tracker，
+        # 否则 sam3_pvs_base.backbone 为空，在 set_image 时会报错
+        sam3_pvs_base = build_tracker(
+            apply_temporal_disambiguation=False,
+            with_backbone=True,
+            vision_backbone=vision_encoder # Reuse the vision encoder
+        )
         inst_predictor = SAM3InteractiveImagePredictor(sam3_pvs_base)
+        print(f"[INFO] 交互式预测器创建完成 (耗时 {time.time() - step_start:.1f} 秒)")
     else:
         inst_predictor = None
+    
     # Create the SAM3 model
+    print("[INFO] 组装 SAM3 模型...")
+    step_start = time.time()
     model = _create_sam3_model(
         backbone,
         transformer,
@@ -625,6 +689,8 @@ def build_sam3_image_model(
         inst_predictor,
         eval_mode,
     )
+    print(f"[INFO] 模型组装完成 (耗时 {time.time() - step_start:.1f} 秒)")
+    print(f"[INFO] 模型结构创建总耗时: {time.time() - build_start:.1f} 秒")
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf()
     # Load checkpoint if provided
